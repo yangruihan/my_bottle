@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
+from urllib import parse
 import cgi
 import mimetypes
 import os
@@ -171,6 +172,77 @@ class Request(threading.local):
         """
         return self._environ.get('REQUEST_METHOD', 'GET').upper()
 
+    @property
+    def query_string(self):
+        """
+        查询字段的内容
+        """
+        return self._environ.get('QUERY_STRING', '')
+
+    @property
+    def input_length(self):
+        """
+        内容长度
+        """
+        try:
+            return int(self._environ.get('CONTENT_LENGTH', '0'))
+        except ValueError:
+            return 0
+
+    @property
+    def GET(self):
+        """
+        返回 GET 方法的参数字典
+        """
+        if self._GET is None:
+            raw_dict = parse.parse_qs(self.query, keep_blank_values=1)
+            self._GET = {}
+            for key, value in raw_dict.items():
+                if len(value) == 1:
+                    self._GET[key] = value[0]
+                else:
+                    self._GET[key] = value
+        return self._GET
+
+    @property
+    def POST(self):
+        """
+        返回 POST 方法的参数字典
+        """
+        if self._POST is None:
+            raw_data = cgi.FieldStorage(fp=self._environ['wsgi.input'], environ=self._environ)
+            self._POST = {}
+            for key, value in raw_data:
+                if value.filename:
+                    self._POST[key] = value
+                elif isinstance(value, list):
+                    self._POST[key] = [v.value for v in value]
+                else:
+                    self._POST[key] = value.value
+        return self._POST
+
+    @property
+    def params(self):
+        """
+        返回 GET POST 混合参数，POST 参数会覆盖掉 GET 里的参数
+        """
+        if self._GETPOST is None:
+            self._GETPOST = dict(self.GET)
+            self._GETPOST.update(self.POST)
+        return self._GETPOST
+
+    @property
+    def COOKIES(self):
+        """
+        返回 Cookies 字典
+        """
+        if self._COOKIES is None:
+            raw_dict = http.cookies.SimpleCookie(self._environ.get('HTTP_COOKIE', ''))
+            self._COOKIES = {}
+            for cookie in raw_dict.values():
+                self._COOKIES[cookie.key] = cookie.value
+        return self._COOKIES
+
 
 class Response(threading.local):
     """
@@ -190,11 +262,37 @@ class Response(threading.local):
         :return:
         """
         self._COOKIES = None
-
         self.status = 200
         self.header = HeaderDict()
         self.content_type = 'text/html'
         self.error = None
+
+    @property
+    def COOKIES(self):
+        if not self._COOKIES:
+            self._COOKIES = http.cookies.SimpleCookie()
+        return self._COOKIES
+
+    def set_cookie(self, key, value, **kargs):
+        """
+        设置一个 Cookie
+        可选设置包括：expires, path, comment, domain, max-age, secure, version, httponly
+        """
+        self.COOKIES[key] = value
+        for k in kargs:
+            self.COOKIES[key][k] = kargs[k]
+
+    def get_content_type(self):
+        """
+        获取 Content-Type 标头内容
+        默认为 text/html
+        """
+        return self.header['Content-Type']
+
+    def set_content_type(self, value):
+        self.header['Content-Type'] = value
+
+    content_type = property(get_content_type, set_content_type, None, get_content_type.__doc__)
 
 
 # 路由方法
@@ -233,7 +331,6 @@ def WSGIHandler(environ, start_response):
     自定义 WSGI Handler
     :param environ: 环境变量
     :param start_response: 响应
-    :return:
     """
     global request
     global response
