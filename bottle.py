@@ -1,7 +1,43 @@
-#!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+"""
+bottle.py is a one-file micro web framework inspired by itty.py (Daniel Lindsley)
+Licence (MIT)
+-------------
+    Copyright (c) 2009, Marcel Hellkamp.
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+Example
+-------
+    from bottle import route, run, request, response
+    @route('/')
+    def index():
+        return 'Hello World!'
+    @route('/hello/:name')
+    def say(name):
+        return 'Hello %s!' % name
+    @route('/hello', method='POST')
+    def say():
+        name = request.POST['name']
+        return 'Hello %s!' % name
+    run(host='localhost', port=8080)
+"""
 
-from urllib import parse
+__author__ = 'Marcel Hellkamp'
+__version__ = ('0', '3', '2')
+__license__ = 'MIT'
+
 import cgi
 import mimetypes
 import os
@@ -65,16 +101,15 @@ HTTP_CODES = {
 }
 
 
-# 异常和事件
+# Exceptions and Events
 
 class BottleException(Exception):
+    """ A base class for exceptions used by bottle."""
     pass
 
 
 class HTTPError(BottleException):
-    """
-    终止当前执行程序，立即跳到错误处理器
-    """
+    """ A way to break the execution and instantly jump to an error handler. """
 
     def __init__(self, status, text):
         self.output = text
@@ -85,50 +120,44 @@ class HTTPError(BottleException):
 
 
 class BreakTheBottle(BottleException):
-    """
-    不是一个异常，但是会直接跳出控制语句
-    由 WSGIHandler 立即调用 start_response() 方法导致
-    返回输出内容
-    """
+    """ Not an exception, but a straight jump out of the controller code.
+
+    Causes the WSGIHandler to instantly call start_response() and return the
+    content of output """
 
     def __init__(self, output):
         self.output = output
 
 
-# 类定义
+# Classes
 
 class HeaderDict(dict):
-    """
-    对键值大小写不敏感的字典
-    你可以通过添加字符串列表的形式添加多个具有相同名字的标头
-    """
+    ''' A dictionary with case insensitive (titled) keys.
+
+    You may add a list of strings to send multible headers with the same name.'''
 
     def __setitem__(self, key, value):
         return dict.__setitem__(self, key.title(), value)
 
-    def __getitem__(self, item):
-        return dict.__getitem__(self, item.title())
+    def __getitem__(self, key):
+        return dict.__getitem__(self, key.title())
 
     def __delitem__(self, key):
         return dict.__delitem__(self, key.title())
 
-    def __contains__(self, item):
-        return dict.__contains__(self, item.title())
+    def __contains__(self, key):
+        return dict.__contains__(self, key.title())
 
     def items(self):
-        """
-        返回一个 (key, value) 元组的列表
-        """
-        for key, values in dict.items():
+        """ Returns a list of (key, value) tuples """
+        for key, values in dict.items(self):
             if not isinstance(values, list):
                 values = [values]
             for value in values:
                 yield (key, str(value))
 
     def add(self, key, value):
-        """
-        添加一个新的标头，并且不删掉原来的那个
-        """
+        """ Adds a new header without deleting old ones """
         if isinstance(value, list):
             for v in value:
                 self.add(key, v)
@@ -142,23 +171,10 @@ class HeaderDict(dict):
 
 
 class Request(threading.local):
-    """
-    使用 thread-local 命名空间来表示一个单独的请求
-    """
-
-    def __init__(self):
-        self._environ = None
-        self._GET = None
-        self._POST = None
-        self._GETPOST = None
-        self._COOKIES = None
-        self.path = ''
+    """ Represents a single request using thread-local namespace. """
 
     def bind(self, environ):
-        """
-        绑定当前的请求中的环境变量到这个请求处理类中
-        :param environ: 环境变量
-        """
+        """ Binds the enviroment of the current request to this request handler """
         self._environ = environ
         self._GET = None
         self._POST = None
@@ -170,23 +186,17 @@ class Request(threading.local):
 
     @property
     def method(self):
-        """
-        返回请求方法 （GET, POST, PUT, DELETE, ...）
-        """
+        ''' Returns the request method (GET,POST,PUT,DELETE,...) '''
         return self._environ.get('REQUEST_METHOD', 'GET').upper()
 
     @property
     def query_string(self):
-        """
-        查询字段的内容
-        """
+        ''' Content of QUERY_STRING '''
         return self._environ.get('QUERY_STRING', '')
 
     @property
     def input_length(self):
-        """
-        内容长度
-        """
+        ''' Content of CONTENT_LENGTH '''
         try:
             return int(self._environ.get('CONTENT_LENGTH', '0'))
         except ValueError:
@@ -194,11 +204,9 @@ class Request(threading.local):
 
     @property
     def GET(self):
-        """
-        返回 GET 方法的参数字典
-        """
+        """Returns a dict with GET parameters."""
         if self._GET is None:
-            raw_dict = parse.parse_qs(self.query, keep_blank_values=1)
+            raw_dict = parse_qs(self.query, keep_blank_values=1)
             self._GET = {}
             for key, value in raw_dict.items():
                 if len(value) == 1:
@@ -209,9 +217,7 @@ class Request(threading.local):
 
     @property
     def POST(self):
-        """
-        返回 POST 方法的参数字典
-        """
+        """Returns a dict with parsed POST data."""
         if self._POST is None:
             raw_data = cgi.FieldStorage(fp=self._environ['wsgi.input'], environ=self._environ)
             self._POST = {}
@@ -226,19 +232,14 @@ class Request(threading.local):
 
     @property
     def params(self):
-        """
-        返回 GET POST 混合参数，POST 参数会覆盖掉 GET 里的参数
-        """
+        ''' Returns a mix of GET and POST data. POST overwrites GET '''
         if self._GETPOST is None:
             self._GETPOST = dict(self.GET)
             self._GETPOST.update(self.POST)
-        return self._GETPOST
 
     @property
     def COOKIES(self):
-        """
-        返回 Cookies 字典
-        """
+        """Returns a dict with COOKIES."""
         if self._COOKIES is None:
             raw_dict = http.cookies.SimpleCookie(self._environ.get('HTTP_COOKIE', ''))
             self._COOKIES = {}
@@ -248,23 +249,12 @@ class Request(threading.local):
 
 
 class Response(threading.local):
-    """
-    使用 thread-local 命名空间来表示一个单独的响应
-    """
-
-    def __init__(self):
-        self._COOKIES = None
-        self.status = 0
-        self.header = None
-        self.content_type = ''
-        self.error = None
+    """ Represents a single response using thread-local namespace. """
 
     def bind(self):
-        """
-        清除旧数据，创建一个新的响应对象
-        :return:
-        """
+        """ Clears old data and creates a brand new Response object """
         self._COOKIES = None
+
         self.status = 200
         self.header = HeaderDict()
         self.content_type = 'text/html'
@@ -277,19 +267,13 @@ class Response(threading.local):
         return self._COOKIES
 
     def set_cookie(self, key, value, **kargs):
-        """
-        设置一个 Cookie
-        可选设置包括：expires, path, comment, domain, max-age, secure, version, httponly
-        """
+        """ Sets a Cookie. Optional settings: expires, path, comment, domain, max-age, secure, version, httponly """
         self.COOKIES[key] = value
         for k in kargs:
             self.COOKIES[key][k] = kargs[k]
 
     def get_content_type(self):
-        """
-        获取 Content-Type 标头内容
-        默认为 text/html
-        """
+        '''Gives access to the 'Content-Type' header and defaults to 'text/html'.'''
         return self.header['Content-Type']
 
     def set_content_type(self, value):
@@ -298,21 +282,19 @@ class Response(threading.local):
     content_type = property(get_content_type, set_content_type, None, get_content_type.__doc__)
 
 
-# 路由方法
+# Routing
+
 def compile_route(route):
-    """
-    编译路由字符串，返回预编译正则表达式对象
-
-    路由字符串支持 url 参数，通过包含命名组的正则表达式
-    例如：
-        '/user/(?P<id>[0-9]+)' 将匹配 '/user/5' 并且提取参数 {'id':'5'}
-
-    更可读的语法也是支持的
-    例如：
-        '/user/:id/:action' 将匹配 '/user/5/kiss' 并且提取参数 {'id':'5', 'action':'kiss'}
-        占位符将匹配任何内容知道下一个'/'
-        '/user/:id#[0-9]+#' 将匹配 '/user/5' 但不能匹配 '/user/tim'
-        除了使用'#'以外，你可以使用任何单独的特殊字符除了'/'
+    """ Compiles a route string and returns a precompiled RegexObject.
+    Routes may contain regular expressions with named groups to support url parameters.
+    Example:
+      '/user/(?P<id>[0-9]+)' will match '/user/5' with {'id':'5'}
+    A more human readable syntax is supported too.
+    Example:
+      '/user/:id/:action' will match '/user/5/kiss' with {'id':'5', 'action':'kiss'}
+      Placeholders match everything up to the next slash.
+      '/user/:id#[0-9]+#' will match '/user/5' but not '/user/tim'
+      Instead of "#" you can use any single special char other than "/"
     """
     route = route.strip().lstrip('$^/ ').rstrip('$^ ')
     route = re.sub(r':([a-zA-Z_]+)(?P<uniq>[^\w/])(?P<re>.+?)(?P=uniq)', r'(?P<\1>\g<re>)', route)
@@ -321,43 +303,35 @@ def compile_route(route):
 
 
 def match_url(url, method='GET'):
-    """
-    返回第一个匹配的 Handler 和一个参数字典
-    否则抛出 HTTPError(404) 异常
+    """Returns the first matching handler and a parameter dict or raises HTTPError(404).
 
-    每隔 1000 个请求重新排列一次 ROUTING_REGEXP 列表
-    如果要关闭此功能，使用 OPTIMIZER = False
-    """
+    This reorders the ROUTING_REGEXP list every 1000 requests. To turn this off, use OPTIMIZER=False"""
     url = '/' + url.strip().lstrip("/")
-
-    # 优先在静态路由表中查找
+    # Search for static routes first
     route = ROUTES_SIMPLE.get(method, {}).get(url, None)
     if route:
-        return route, {}
+        return (route, {})
 
-    # 搜索正则表达式路由配置
+    # Now search regexp routes
     routes = ROUTES_REGEXP.get(method, [])
     for i in range(len(routes)):
         match = routes[i][0].match(url)
         if match:
             handler = routes[i][1]
             if i > 0 and OPTIMIZER and random.random() <= 0.001:
-                # 每 1000 次请求，将路由匹配列表中的元素与其前驱进行交换
-                # 经常使用的线路会逐渐出现在列表前面
+                # Every 1000 requests, we swap the matching route with its predecessor.
+                # Frequently used routes will slowly wander up the list.
                 routes[i - 1], routes[i] = routes[i], routes[i - 1]
             return handler, match.groupdict()
-    raise HTTPError(404, "Not Found")
+    raise HTTPError(404, "Not found")
 
 
 def add_route(route, handler, method='GET', simple=False):
-    """
-    向路由映射表中添加一个新的路由
-
-    例如：
-    def hello():
-        return "Hello World!"
-    add_route(r'/hello', hello)
-    """
+    """ Adds a new route to the route mappings.
+        Example:
+        def hello():
+          return "Hello world!"
+        add_route(r'/hello', hello)"""
     method = method.strip().upper()
     if re.match(r'^/(\w+/)*\w*$', route) or simple:
         ROUTES_SIMPLE.setdefault(method, {})[route] = handler
@@ -367,10 +341,7 @@ def add_route(route, handler, method='GET', simple=False):
 
 
 def route(url, **kargs):
-    """
-    request 处理器装饰器
-    作用与 add_route 相同
-    """
+    """ Decorator for request handler. Same as add_route(url, handler)."""
 
     def wrapper(handler):
         add_route(url, handler, **kargs)
@@ -379,20 +350,16 @@ def route(url, **kargs):
     return wrapper
 
 
-# 错误处理
+# Error handling
+
 def set_error_handler(code, handler):
-    """
-    设置一个新的错误处理器
-    """
+    """ Sets a new error handler. """
     code = int(code)
     ERROR_HANDLER[code] = handler
 
 
 def error(code=500):
-    """
-    错误处理器装饰器
-    作用于 set_error_handler 相同
-    """
+    """ Decorator for error handler. Same as set_error_handler(code, handler)."""
 
     def wrapper(handler):
         set_error_handler(code, handler)
@@ -401,12 +368,10 @@ def error(code=500):
     return wrapper
 
 
+# Actual WSGI Stuff
+
 def WSGIHandler(environ, start_response):
-    """
-    自定义 WSGI Handler
-    :param environ: 环境变量
-    :param start_response: 响应
-    """
+    """The bottle WSGI-handler."""
     global request
     global response
     request.bind(environ)
@@ -418,17 +383,17 @@ def WSGIHandler(environ, start_response):
         output = shard.output
     except Exception as exception:
         response.status = getattr(exception, 'http_status', 500)
-        error_handler = ERROR_HANDLER.get(response.status, None)
-        if error_handler:
+        errorhandler = ERROR_HANDLER.get(response.status, None)
+        if errorhandler:
             try:
-                output = error_handler(exception)
+                output = errorhandler(exception)
             except:
-                output = 'Exception within error handler! Application stopped.'
+                output = "Exception within error handler! Application stopped."
         else:
             if DEBUG:
-                output = 'Exception %s: %s' % (exception.__class__.__name__, str(exception))
+                output = "Exception %s: %s" % (exception.__class__.__name__, str(exception))
             else:
-                output = 'Unhandled exception: Application stopped.'
+                output = "Unhandled exception: Application stopped."
 
         if response.status == 500:
             request._environ['wsgi.errors'].write("Error (500) on '%s': %s\n" % (request.path, exception))
@@ -446,16 +411,13 @@ def WSGIHandler(environ, start_response):
         response.header.add('Set-Cookie', c.OutputString())
 
     status = '%d %s' % (response.status, HTTP_CODES[response.status])
-    start_response(status, list(response))
+    start_response(status, list(response.header.items()))
     return output
 
 
-# 服务器适配器
-class ServerAdapter(object):
-    """
-    服务器适配器，用于为多个不同的服务器端，提供统一的接口
-    """
+# Server adapter
 
+class ServerAdapter(object):
     def __init__(self, host='127.0.0.1', port=8080, **kargs):
         self.host = host
         self.port = int(port)
@@ -495,8 +457,15 @@ class PasteServer(ServerAdapter):
 
 
 def run(server=WSGIRefServer, host='127.0.0.1', port=8080, **kargs):
+    """ Runs bottle as a web server, using Python's built-in wsgiref implementation by default.
+
+    You may choose between WSGIRefServer, CherryPyServer, FlupServer and
+    PasteServer or write your own server adapter.
+    """
+
     quiet = bool('quiet' in kargs and kargs['quiet'])
 
+    # Instanciate server, if it is a class instead of an instance
     if isinstance(server, type) and issubclass(server, ServerAdapter):
         server = server(host=host, port=port, **kargs)
 
@@ -504,38 +473,37 @@ def run(server=WSGIRefServer, host='127.0.0.1', port=8080, **kargs):
         raise RuntimeError("Server must be a subclass of ServerAdapter")
 
     if not quiet:
-        print('Server starting up (using %s)...' % repr(server))
-        print('Listening on http://%s:%d/' % (server.host, server.port))
-        print('Use Ctrl-C to quit.')
-        print()
+        print
+        'Bottle server starting up (using %s)...' % repr(server)
+        print
+        'Listening on http://%s:%d/' % (server.host, server.port)
+        print
+        'Use Ctrl-C to quit.'
+        print
 
     try:
         server.run(WSGIHandler)
     except KeyboardInterrupt:
-        print('Shuting down...')
+        print
+        "Shuting down..."
 
 
-# 辅助方法
-def abort(code=500, text='Unknown Error: Application stopped.'):
-    """
-    中止执行并导致一个 HTTP 错误
-    """
+# Helper
+
+def abort(code=500, text='Unknown Error: Appliction stopped.'):
+    """ Aborts execution and causes a HTTP error. """
     raise HTTPError(code, text)
 
 
 def redirect(url, code=307):
-    """
-    中止执行并导致一个 307 重定向
-    """
+    """ Aborts execution and causes a 307 redirect """
     response.status = code
     response.header['Location'] = url
     raise BreakTheBottle("")
 
 
 def send_file(filename, root, guessmime=True, mimetype='text/plain'):
-    """
-    中止执行并发送一个静态文件作为响应
-    """
+    """ Aborts execution and sends a static files as response. """
     root = os.path.abspath(root) + '/'
     filename = os.path.normpath(filename).strip('/')
     filename = os.path.join(root, filename)
@@ -560,9 +528,11 @@ def send_file(filename, root, guessmime=True, mimetype='text/plain'):
     raise BreakTheBottle(open(filename, 'r'))
 
 
-# 默认错误处理器
+# Default error handler
+
 @error(500)
 def error500(exception):
+    """If an exception is thrown, deal with it and present an error page."""
     if DEBUG:
         return str(exception)
     else:
@@ -571,6 +541,7 @@ def error500(exception):
 
 @error(404)
 def error404(exception):
+    """If an exception is thrown, deal with it and present an error page."""
     yield '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">'
     yield '<html><head><title>Error 404: Not found</title>'
     yield '</head><body><h1>Error 404: Not found</h1>'
@@ -578,5 +549,14 @@ def error404(exception):
     yield '</body></html>'
 
 
+# Last but not least
+
 request = Request()
 response = Response()
+
+
+
+
+
+
+# len(__file__) == 600  :D
