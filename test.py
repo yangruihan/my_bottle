@@ -2,12 +2,28 @@
 # -*- coding:utf-8 -*-
 
 
-from my_bottle import run
+from my_bottle import route, run, request, response, send_file, abort, PasteServer
 
 
-def main():
-    run(host='localhost', port=8080)
+@route('/')
+def hello_world():
+    return 'Hello World!'
 
 
-if __name__ == '__main__':
-    main()
+@route('/hello/:name')
+def hello_name(name):
+    return 'Hello %s!' % name
+
+
+@route('/hello', method='POST')
+def hello_post():
+    name = request.POST['name']
+    return 'Hello %s!' % name
+
+
+@route('/static/:filename#.*#')
+def static_file(filename):
+    send_file(filename, root='/path/to/static/files/')
+
+
+run(host='localhost', port=8080)

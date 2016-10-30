@@ -5,10 +5,13 @@ from urllib import parse
 import cgi
 import mimetypes
 import os
+import sys
+import traceback
 import re
 import random
 import http.cookies
 import threading
+import time
 
 try:
     from urlparse import parse_qs
@@ -16,7 +19,7 @@ except ImportError:
     from cgi import parse_qs
 
 DEBUG = False
-OPTIMIZER = True
+OPTIMIZER = False
 ROUTES_SIMPLE = {}
 ROUTES_REGEXP = {}
 ERROR_HANDLER = {}
@@ -119,7 +122,7 @@ class HeaderDict(dict):
         """
         返回一个 (key, value) 元组的列表
         """
-        for key, values in dict.items():
+        for key, values in dict.items(self):
             if not isinstance(values, list):
                 values = [values]
             for value in values:
@@ -145,14 +148,6 @@ class Request(threading.local):
     """
     使用 thread-local 命名空间来表示一个单独的请求
     """
-
-    def __init__(self):
-        self._environ = None
-        self._GET = None
-        self._POST = None
-        self._GETPOST = None
-        self._COOKIES = None
-        self.path = ''
 
     def bind(self, environ):
         """
@@ -198,7 +193,7 @@ class Request(threading.local):
         返回 GET 方法的参数字典
         """
         if self._GET is None:
-            raw_dict = parse.parse_qs(self.query, keep_blank_values=1)
+            raw_dict = parse.parse_qs(self.query_string, keep_blank_values=1)
             self._GET = {}
             for key, value in raw_dict.items():
                 if len(value) == 1:
@@ -215,13 +210,13 @@ class Request(threading.local):
         if self._POST is None:
             raw_data = cgi.FieldStorage(fp=self._environ['wsgi.input'], environ=self._environ)
             self._POST = {}
-            for key, value in raw_data:
-                if value.filename:
-                    self._POST[key] = value
-                elif isinstance(value, list):
-                    self._POST[key] = [v.value for v in value]
+            for key in raw_data:
+                if raw_data[key].filename:
+                    self._POST[key] = raw_data[key]
+                elif isinstance(raw_data[key], list):
+                    self._POST[key] = [v.value for v in raw_data[key]]
                 else:
-                    self._POST[key] = value.value
+                    self._POST[key] = raw_data[key].value
         return self._POST
 
     @property
@@ -252,17 +247,9 @@ class Response(threading.local):
     使用 thread-local 命名空间来表示一个单独的响应
     """
 
-    def __init__(self):
-        self._COOKIES = None
-        self.status = 0
-        self.header = None
-        self.content_type = ''
-        self.error = None
-
     def bind(self):
         """
         清除旧数据，创建一个新的响应对象
-        :return:
         """
         self._COOKIES = None
         self.status = 200
@@ -433,20 +420,22 @@ def WSGIHandler(environ, start_response):
         if response.status == 500:
             request._environ['wsgi.errors'].write("Error (500) on '%s': %s\n" % (request.path, exception))
 
-    if hasattr(output, 'read'):
-        if 'wsgi.file_wrapper' in environ:
-            output = environ['wsgi.file_wrapper'](output)
-        else:
-            output = iter(lambda: output.read(8192), '')
+    if hasattr(output, 'fileno') and 'Content-Length' not in response.header:
+        size = os.fstat(output.filenp()).st_size
+        response.header['Content-Length'] = size
 
-    if hasattr(output, '__len__') and 'Content-Length' not in response.header:
-        response.header['Content-Length'] = len(output)
+    if hasattr(output, 'read'):
+        file_output = output
+        if 'wsgi.file_wrapper' in environ:
+            output = environ['wsgi.file_wrapper'](file_output)
+        else:
+            output = iter(lambda: file_output.read(8192), '')
 
     for c in response.COOKIES.values():
         response.header.add('Set-Cookie', c.OutputString())
 
     status = '%d %s' % (response.status, HTTP_CODES[response.status])
-    start_response(status, list(response))
+    start_response(status, list(response.header.items()))
     return output
 
 
@@ -491,10 +480,32 @@ class FlupServer(ServerAdapter):
 class PasteServer(ServerAdapter):
     def run(self, handler):
         from paste import httpserver
-        httpserver.serve(handler, host=self.host, port=str(self.port))
+        from paste.translogger import TransLogger
+        app = TransLogger(handler)
+        httpserver.serve(app, host=self.host, port=str(self.port))
 
 
-def run(server=WSGIRefServer, host='127.0.0.1', port=8080, **kargs):
+# Python3 不支持
+# class FapwsServer(ServerAdapter):
+#     def run(self, handler):
+#         import fapws._evwsgi as evwsgi
+#         from fapws import base
+#         import sys
+#         evwsgi.start(self.host, self.port)
+#         evwsgi.set_base_module(base)
+#
+#         def app(environ, start_response):
+#             environ['wsgi.multiprocess'] = False
+#             return handler(environ, start_response)
+#
+#         evwsgi.wsgi_cb(('', app))
+#         evwsgi.run()
+
+
+def run(server=WSGIRefServer, host='127.0.0.1', port=8080, optinmize=False, **kargs):
+    global OPTIMIZER
+
+    OPTIMIZER = bool(optinmize)
     quiet = bool('quiet' in kargs and kargs['quiet'])
 
     if isinstance(server, type) and issubclass(server, ServerAdapter):
@@ -556,7 +567,15 @@ def send_file(filename, root, guessmime=True, mimetype='text/plain'):
     elif mimetype:
         response.content_type = mimetype
 
-    # TODO: Add Last-Modified header (Wed, 15 Nov 1995 04:58:08 GMT)
+    stats = os.stat(filename)
+    if 'Content-Length' not in response.header:
+        response.header['Content-Length'] = stats.st_size
+
+    if 'Last-Modified' not in response.header:
+        ts = time.gmtime(stats.st_mtime)
+        ts = time.strftime("%a, %d %b %Y %H:%M:%S +0000", ts)
+        response.header['Last-Modified'] = ts
+
     raise BreakTheBottle(open(filename, 'r'))
 
 
@@ -564,17 +583,21 @@ def send_file(filename, root, guessmime=True, mimetype='text/plain'):
 @error(500)
 def error500(exception):
     if DEBUG:
-        return str(exception)
+        return "<br>\n".join(traceback.format_exc(10).splitlines()).replace('  ', '&nbsp;&nbsp;')
     else:
         return """<b>Error:</b> Internal server error."""
 
 
+@error(401)
 @error(404)
-def error404(exception):
+def error_http(exception):
+    status = response.status
+    name = HTTP_CODES.get(status, 'Unknown').title()
+    url = request.path
     yield '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">'
-    yield '<html><head><title>Error 404: Not found</title>'
-    yield '</head><body><h1>Error 404: Not found</h1>'
-    yield '<p>The requested URL %s was not found on this server.</p>' % request.path
+    yield '<html><head><title>Error %d: %s</title>' % (status, name)
+    yield '</head><body><h1>Error %d: %s</h1>' % (status, name)
+    yield '<p>Sorry, the requested URL %s caused an error.</p>' % url
     yield '</body></html>'
 
 
