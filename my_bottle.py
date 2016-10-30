@@ -579,6 +579,24 @@ def send_file(filename, root, guessmime=True, mimetype='text/plain'):
     raise BreakTheBottle(open(filename, 'r'))
 
 
+# 装饰器
+def validate(**vkargs):
+    def decorator(func):
+        def wrapper(**kargs):
+            for key in kargs:
+                if key not in vkargs:
+                    abort(400, 'Missing parameter: %s' % key)
+                try:
+                    kargs[key] = vkargs[key](kargs[key])
+                except ValueError as e:
+                    abort(400, 'Wrong parameter format for: %s' % key)
+            return func(**kargs)
+
+        return wrapper
+
+    return decorator
+
+
 # 默认错误处理器
 @error(500)
 def error500(exception):
@@ -588,6 +606,7 @@ def error500(exception):
         return """<b>Error:</b> Internal server error."""
 
 
+@error(400)
 @error(401)
 @error(404)
 def error_http(exception):
@@ -598,6 +617,8 @@ def error_http(exception):
     yield '<html><head><title>Error %d: %s</title>' % (status, name)
     yield '</head><body><h1>Error %d: %s</h1>' % (status, name)
     yield '<p>Sorry, the requested URL %s caused an error.</p>' % url
+    if hasattr(exception, 'output'):
+        yield exception.output
     yield '</body></html>'
 
 
