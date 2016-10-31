@@ -12,60 +12,12 @@ import random
 import http.cookies
 import threading
 import time
+import builtins
 
 try:
     from urlparse import parse_qs
 except ImportError:
     from cgi import parse_qs
-
-DEBUG = False
-OPTIMIZER = False
-ROUTES_SIMPLE = {}
-ROUTES_REGEXP = {}
-ERROR_HANDLER = {}
-HTTP_CODES = {
-    100: 'CONTINUE',
-    101: 'SWITCHING PROTOCOLS',
-    200: 'OK',
-    201: 'CREATED',
-    202: 'ACCEPTED',
-    203: 'NON-AUTHORITATIVE INFORMATION',
-    204: 'NO CONTENT',
-    205: 'RESET CONTENT',
-    206: 'PARTIAL CONTENT',
-    300: 'MULTIPLE CHOICES',
-    301: 'MOVED PERMANENTLY',
-    302: 'FOUND',
-    303: 'SEE OTHER',
-    304: 'NOT MODIFIED',
-    305: 'USE PROXY',
-    306: 'RESERVED',
-    307: 'TEMPORARY REDIRECT',
-    400: 'BAD REQUEST',
-    401: 'UNAUTHORIZED',
-    402: 'PAYMENT REQUIRED',
-    403: 'FORBIDDEN',
-    404: 'NOT FOUND',
-    405: 'METHOD NOT ALLOWED',
-    406: 'NOT ACCEPTABLE',
-    407: 'PROXY AUTHENTICATION REQUIRED',
-    408: 'REQUEST TIMEOUT',
-    409: 'CONFLICT',
-    410: 'GONE',
-    411: 'LENGTH REQUIRED',
-    412: 'PRECONDITION FAILED',
-    413: 'REQUEST ENTITY TOO LARGE',
-    414: 'REQUEST-URI TOO LONG',
-    415: 'UNSUPPORTED MEDIA TYPE',
-    416: 'REQUESTED RANGE NOT SATISFIABLE',
-    417: 'EXPECTATION FAILED',
-    500: 'INTERNAL SERVER ERROR',
-    501: 'NOT IMPLEMENTED',
-    502: 'BAD GATEWAY',
-    503: 'SERVICE UNAVAILABLE',
-    504: 'GATEWAY TIMEOUT',
-    505: 'HTTP VERSION NOT SUPPORTED',
-}
 
 
 # 异常和事件
@@ -98,50 +50,59 @@ class BreakTheBottle(BottleException):
         self.output = output
 
 
-# 类定义
+class TemplateError(BottleException):
+    pass
 
-class HeaderDict(dict):
+
+def WSGIHandler(environ, start_response):
     """
-    对键值大小写不敏感的字典
-    你可以通过添加字符串列表的形式添加多个具有相同名字的标头
+    自定义 WSGI Handler
+    :param environ: 环境变量
+    :param start_response: 响应
     """
-
-    def __setitem__(self, key, value):
-        return dict.__setitem__(self, key.title(), value)
-
-    def __getitem__(self, item):
-        return dict.__getitem__(self, item.title())
-
-    def __delitem__(self, key):
-        return dict.__delitem__(self, key.title())
-
-    def __contains__(self, item):
-        return dict.__contains__(self, item.title())
-
-    def items(self):
-        """
-        返回一个 (key, value) 元组的列表
-        """
-        for key, values in dict.items(self):
-            if not isinstance(values, list):
-                values = [values]
-            for value in values:
-                yield (key, str(value))
-
-    def add(self, key, value):
-        """
-        添加一个新的标头，并且不删掉原来的那个
-        """
-        if isinstance(value, list):
-            for v in value:
-                self.add(key, v)
-        elif key in self:
-            if isinstance(self[key], list):
-                self[key].append(value)
-            else:
-                self[key] = [self[key], value]
+    global request
+    global response
+    request.bind(environ)
+    response.bind()
+    try:
+        handler, args = match_url(request.path, request.method)
+        output = handler(**args)
+    except BreakTheBottle as shard:
+        output = shard.output
+    except Exception as exception:
+        response.status = getattr(exception, 'http_status', 500)
+        error_handler = ERROR_HANDLER.get(response.status, None)
+        if error_handler:
+            try:
+                output = error_handler(exception)
+            except:
+                output = 'Exception within error handler! Application stopped.'
         else:
-            self[key] = [value]
+            if DEBUG:
+                output = 'Exception %s: %s' % (exception.__class__.__name__, str(exception))
+            else:
+                output = 'Unhandled exception: Application stopped.'
+
+        if response.status == 500:
+            request._environ['wsgi.errors'].write("Error (500) on '%s': %s\n" % (request.path, exception))
+
+    if hasattr(output, 'fileno') and 'Content-Length' not in response.header:
+        size = os.fstat(output.filenp()).st_size
+        response.header['Content-Length'] = size
+
+    if hasattr(output, 'read'):
+        file_output = output
+        if 'wsgi.file_wrapper' in environ:
+            output = environ['wsgi.file_wrapper'](file_output)
+        else:
+            output = iter(lambda: file_output.read(8192), '')
+
+    for c in response.COOKIES.values():
+        response.header.add('Set-Cookie', c.OutputString())
+
+    status = '%d %s' % (response.status, HTTP_CODES[response.status])
+    start_response(status, list(response.header.items()))
+    return output
 
 
 class Request(threading.local):
@@ -285,6 +246,105 @@ class Response(threading.local):
     content_type = property(get_content_type, set_content_type, None, get_content_type.__doc__)
 
 
+# 类定义
+
+class HeaderDict(dict):
+    """
+    对键值大小写不敏感的字典
+    你可以通过添加字符串列表的形式添加多个具有相同名字的标头
+    """
+
+    def __setitem__(self, key, value):
+        return dict.__setitem__(self, key.title(), value)
+
+    def __getitem__(self, item):
+        return dict.__getitem__(self, item.title())
+
+    def __delitem__(self, key):
+        return dict.__delitem__(self, key.title())
+
+    def __contains__(self, item):
+        return dict.__contains__(self, item.title())
+
+    def items(self):
+        """
+        返回一个 (key, value) 元组的列表
+        """
+        for key, values in dict.items(self):
+            if not isinstance(values, list):
+                values = [values]
+            for value in values:
+                yield (key, str(value))
+
+    def add(self, key, value):
+        """
+        添加一个新的标头，并且不删掉原来的那个
+        """
+        if isinstance(value, list):
+            for v in value:
+                self.add(key, v)
+        elif key in self:
+            if isinstance(self[key], list):
+                self[key].append(value)
+            else:
+                self[key] = [self[key], value]
+        else:
+            self[key] = [value]
+
+
+# 辅助方法
+def abort(code=500, text='Unknown Error: Application stopped.'):
+    """
+    中止执行并导致一个 HTTP 错误
+    """
+    raise HTTPError(code, text)
+
+
+def redirect(url, code=307):
+    """
+    中止执行并导致一个 307 重定向
+    """
+    response.status = code
+    response.header['Location'] = url
+    raise BreakTheBottle("")
+
+
+def send_file(filename, root, guessmime=True, mimetype='text/plain'):
+    """
+    中止执行并发送一个静态文件作为响应
+    """
+    root = os.path.abspath(root) + '/'
+    filename = os.path.normpath(filename).strip('/')
+    filename = os.path.join(root, filename)
+
+    if not filename.startswith(root):
+        abort(401, "Access denied.")
+    if not os.path.exists(filename) or not os.path.isfile(filename):
+        abort(404, "File does not exist.")
+    if not os.access(filename, os.R_OK):
+        abort(401, "You do not have permission to access this file.")
+
+    if guessmime:
+        guess = mimetypes.guess_type(filename)[0]
+        if guess:
+            response.content_type = guess
+        elif mimetype:
+            response.content_type = mimetype
+    elif mimetype:
+        response.content_type = mimetype
+
+    stats = os.stat(filename)
+    if 'Content-Length' not in response.header:
+        response.header['Content-Length'] = stats.st_size
+
+    if 'Last-Modified' not in response.header:
+        ts = time.gmtime(stats.st_mtime)
+        ts = time.strftime("%a, %d %b %Y %H:%M:%S +0000", ts)
+        response.header['Last-Modified'] = ts
+
+    raise BreakTheBottle(open(filename, 'r'))
+
+
 # 路由方法
 def compile_route(route):
     """
@@ -366,6 +426,24 @@ def route(url, **kargs):
     return wrapper
 
 
+# 装饰器
+def validate(**vkargs):
+    def decorator(func):
+        def wrapper(**kargs):
+            for key in kargs:
+                if key not in vkargs:
+                    abort(400, 'Missing parameter: %s' % key)
+                try:
+                    kargs[key] = vkargs[key](kargs[key])
+                except ValueError as e:
+                    abort(400, 'Wrong parameter format for: %s' % key)
+            return func(**kargs)
+
+        return wrapper
+
+    return decorator
+
+
 # 错误处理
 def set_error_handler(code, handler):
     """
@@ -386,57 +464,6 @@ def error(code=500):
         return handler
 
     return wrapper
-
-
-def WSGIHandler(environ, start_response):
-    """
-    自定义 WSGI Handler
-    :param environ: 环境变量
-    :param start_response: 响应
-    """
-    global request
-    global response
-    request.bind(environ)
-    response.bind()
-    try:
-        handler, args = match_url(request.path, request.method)
-        output = handler(**args)
-    except BreakTheBottle as shard:
-        output = shard.output
-    except Exception as exception:
-        response.status = getattr(exception, 'http_status', 500)
-        error_handler = ERROR_HANDLER.get(response.status, None)
-        if error_handler:
-            try:
-                output = error_handler(exception)
-            except:
-                output = 'Exception within error handler! Application stopped.'
-        else:
-            if DEBUG:
-                output = 'Exception %s: %s' % (exception.__class__.__name__, str(exception))
-            else:
-                output = 'Unhandled exception: Application stopped.'
-
-        if response.status == 500:
-            request._environ['wsgi.errors'].write("Error (500) on '%s': %s\n" % (request.path, exception))
-
-    if hasattr(output, 'fileno') and 'Content-Length' not in response.header:
-        size = os.fstat(output.filenp()).st_size
-        response.header['Content-Length'] = size
-
-    if hasattr(output, 'read'):
-        file_output = output
-        if 'wsgi.file_wrapper' in environ:
-            output = environ['wsgi.file_wrapper'](file_output)
-        else:
-            output = iter(lambda: file_output.read(8192), '')
-
-    for c in response.COOKIES.values():
-        response.header.add('Set-Cookie', c.OutputString())
-
-    status = '%d %s' % (response.status, HTTP_CODES[response.status])
-    start_response(status, list(response.header.items()))
-    return output
 
 
 # 服务器适配器
@@ -526,75 +553,42 @@ def run(server=WSGIRefServer, host='127.0.0.1', port=8080, optinmize=False, **ka
         print('Shuting down...')
 
 
-# 辅助方法
-def abort(code=500, text='Unknown Error: Application stopped.'):
-    """
-    中止执行并导致一个 HTTP 错误
-    """
-    raise HTTPError(code, text)
+# 模板
+class BaseTemplate(object):
+    def __init__(self, template):
+        self.code = self.compile(template)
+        self.co = compile(self.code, '<string>', 'exec')
+
+    def compile(self, template):
+        pass
+
+    def render(self, **args):
+        args['stdout'] = []
+        args['__builtins__'] = builtins
+        eval(self.co, {}, args)
+        return ''.join(args['stdout'])
 
 
-def redirect(url, code=307):
-    """
-    中止执行并导致一个 307 重定向
-    """
-    response.status = code
-    response.header['Location'] = url
-    raise BreakTheBottle("")
+class SimpleTemplate(BaseTemplate):
+    re_block = re.compile(r'^\s*%\s*((if|elif|else|try|except|finally|for|while|with).*:)\s*$')
+    re_end = re.compile(r'^\s*%\s*end(.*?)\s*$')
+    re_code = re.compile(r'^\s*%\s*(.*?)\s*$')
+    re_inc = re.compile(r'\{\{(.*?)\}\}')
 
+    def compile(self, template):
+        return "\n".join(self._compile(template))
 
-def send_file(filename, root, guessmime=True, mimetype='text/plain'):
-    """
-    中止执行并发送一个静态文件作为响应
-    """
-    root = os.path.abspath(root) + '/'
-    filename = os.path.normpath(filename).strip('/')
-    filename = os.path.join(root, filename)
+    def _compile(self, template):
+        def code_str(level, line, value):
+            value = "".join(value)
+            value = value.replace("'", "\'").replace('\\', '\\\\')
+            return '    ' * level + "stdout.append(r'''%s''')" % value
 
-    if not filename.startswith(root):
-        abort(401, "Access denied.")
-    if not os.path.exists(filename) or not os.path.isfile(filename):
-        abort(404, "File does not exist.")
-    if not os.access(filename, os.R_OK):
-        abort(401, "You do not have permission to access this file.")
+        def code_print(level, line, value):
+            return '    ' * level + "stdout.append(str(%s)) # Line: %d" % (value.strip(), line)
 
-    if guessmime:
-        guess = mimetypes.guess_type(filename)[0]
-        if guess:
-            response.content_type = guess
-        elif mimetype:
-            response.content_type = mimetype
-    elif mimetype:
-        response.content_type = mimetype
-
-    stats = os.stat(filename)
-    if 'Content-Length' not in response.header:
-        response.header['Content-Length'] = stats.st_size
-
-    if 'Last-Modified' not in response.header:
-        ts = time.gmtime(stats.st_mtime)
-        ts = time.strftime("%a, %d %b %Y %H:%M:%S +0000", ts)
-        response.header['Last-Modified'] = ts
-
-    raise BreakTheBottle(open(filename, 'r'))
-
-
-# 装饰器
-def validate(**vkargs):
-    def decorator(func):
-        def wrapper(**kargs):
-            for key in kargs:
-                if key not in vkargs:
-                    abort(400, 'Missing parameter: %s' % key)
-                try:
-                    kargs[key] = vkargs[key](kargs[key])
-                except ValueError as e:
-                    abort(400, 'Wrong parameter format for: %s' % key)
-            return func(**kargs)
-
-        return wrapper
-
-    return decorator
+        def code_raw(level, line, value):
+            return '    ' * level + value.strip() + ' # Line: %d' % line
 
 
 # 默认错误处理器
@@ -624,3 +618,53 @@ def error_http(exception):
 
 request = Request()
 response = Response()
+DEBUG = False
+OPTIMIZER = False
+TEMPLATE_GENERATOR = lambda x: SimpleTemplate(open('./%s.tpl' % x, 'r').read())
+TEMPLATES = {}
+ROUTES_SIMPLE = {}
+ROUTES_REGEXP = {}
+ERROR_HANDLER = {}
+HTTP_CODES = {
+    100: 'CONTINUE',
+    101: 'SWITCHING PROTOCOLS',
+    200: 'OK',
+    201: 'CREATED',
+    202: 'ACCEPTED',
+    203: 'NON-AUTHORITATIVE INFORMATION',
+    204: 'NO CONTENT',
+    205: 'RESET CONTENT',
+    206: 'PARTIAL CONTENT',
+    300: 'MULTIPLE CHOICES',
+    301: 'MOVED PERMANENTLY',
+    302: 'FOUND',
+    303: 'SEE OTHER',
+    304: 'NOT MODIFIED',
+    305: 'USE PROXY',
+    306: 'RESERVED',
+    307: 'TEMPORARY REDIRECT',
+    400: 'BAD REQUEST',
+    401: 'UNAUTHORIZED',
+    402: 'PAYMENT REQUIRED',
+    403: 'FORBIDDEN',
+    404: 'NOT FOUND',
+    405: 'METHOD NOT ALLOWED',
+    406: 'NOT ACCEPTABLE',
+    407: 'PROXY AUTHENTICATION REQUIRED',
+    408: 'REQUEST TIMEOUT',
+    409: 'CONFLICT',
+    410: 'GONE',
+    411: 'LENGTH REQUIRED',
+    412: 'PRECONDITION FAILED',
+    413: 'REQUEST ENTITY TOO LARGE',
+    414: 'REQUEST-URI TOO LONG',
+    415: 'UNSUPPORTED MEDIA TYPE',
+    416: 'REQUESTED RANGE NOT SATISFIABLE',
+    417: 'EXPECTATION FAILED',
+    500: 'INTERNAL SERVER ERROR',
+    501: 'NOT IMPLEMENTED',
+    502: 'BAD GATEWAY',
+    503: 'SERVICE UNAVAILABLE',
+    504: 'GATEWAY TIMEOUT',
+    505: 'HTTP VERSION NOT SUPPORTED',
+}
